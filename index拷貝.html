@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>美股專屬均線分析系統（無AI版）</title>
+
+  <!-- Lightweight Charts 固定版本 -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-slate-950 text-slate-200 min-h-screen p-4 md:p-8 font-sans overflow-hidden">
+
+  <div class="max-w-7xl mx-auto flex flex-col lg:flex-row gap-6 h-[calc(100vh-4rem)]">
+    <!-- 左側側邊欄 -->
+    <div class="w-full lg:w-80 flex flex-col gap-4 overflow-hidden h-full">
+      <!-- 搜尋與核心功能 -->
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-2xl shrink-0">
+        <h1 class="text-xl font-black mb-6 flex items-center gap-2 text-white uppercase tracking-tighter">
+          <span class="w-1.5 h-6 bg-blue-600 rounded-full"></span>
+          美股分析儀（無AI）
+        </h1>
+
+        <div class="space-y-4">
+          <div class="flex gap-2">
+            <input id="stock-input" type="text" value="AAPL"
+                   class="bg-slate-950 border border-slate-700 rounded-xl px-4 py-2 w-full uppercase font-mono focus:border-blue-500 outline-none text-sm" />
+            <button id="btn-search"
+                    class="bg-blue-600 hover:bg-blue-500 px-3 rounded-xl font-bold transition-all text-xs">
+              搜尋
+            </button>
+          </div>
+
+          <button id="btn-add-watchlist"
+                  class="w-full text-[10px] text-blue-400 font-bold hover:text-blue-300 uppercase tracking-widest">
+            + 加入自選清單
+          </button>
+
+          <div class="text-[10px] text-slate-500 leading-relaxed">
+            資料來源：Alpha Vantage（免費版有限流）<br/>
+            已內建 60 秒快取；預設顯示最近 400 個交易日（>1年）。
+          </div>
+        </div>
+      </div>
+
+      <!-- 我的自選股區域 -->
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-2xl flex-1 flex flex-col overflow-hidden text-left">
+        <h2 class="text-[10px] uppercase tracking-widest text-slate-500 font-bold mb-4 shrink-0">
+          我的自選股 (WATCHLIST)
+        </h2>
+
+        <div id="watchlist-container" class="space-y-2 overflow-y-auto flex-1 pr-2 custom-scrollbar"></div>
+
+        <div id="status-bar" class="mt-4 text-center h-4"></div>
+      </div>
+    </div>
+
+    <!-- 右側主區塊 -->
+    <div class="flex-1 flex flex-col gap-4 overflow-hidden h-full text-left">
+      <div class="flex-1 bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl flex flex-col relative min-h-0">
+        <div class="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur-md shrink-0">
+          <div>
+            <span id="symbolTitle" class="text-3xl font-black text-white">AAPL</span>
+            <span class="text-[10px] text-slate-500 ml-2 uppercase tracking-widest border border-slate-700 px-2 py-0.5 rounded">
+              Daily Candles + MA
+            </span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+            <span class="text-[10px] text-slate-400 font-mono">LOCAL</span>
+          </div>
+        </div>
+
+        <div id="chart-box" class="flex-1 w-full bg-slate-950"></div>
+      </div>
+
+      <!-- 下方配置區 -->
+      <div class="bg-slate-900 border border-slate-800 p-6 rounded-3xl shadow-2xl shrink-0">
+        <div class="flex justify-between items-center mb-4">
+          <label class="text-[10px] uppercase tracking-widest text-slate-500 font-bold">
+            均線設定 (MA CONFIG) - 每個股票獨立保存
+          </label>
+          <div class="flex gap-4">
+            <button id="btn-add-ma" class="text-blue-400 text-[10px] hover:underline font-bold">
+              + 新增均線
+            </button>
+            <button id="btn-save" class="text-green-400 text-[10px] hover:underline font-bold">
+              ✓ 儲存此股票設定
+            </button>
+          </div>
+        </div>
+        <div id="ma-list" class="flex flex-wrap gap-3"></div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+  </style>
+
+  <script>
+    /**********************
+     * 0) 基本設定
+     **********************/
+    // ⚠️ 建議把 API KEY 換成你自己的（Alpha Vantage 免費版會限流）
+    const AV_API_KEY = "HUKRP7S75SZ40OFE";
+
+    // LocalStorage keys
+    const LS_WATCHLIST_KEY = "stock_ma_watchlist_v1";
+    const LS_MA_PREFIX = "stock_ma_config_v1__"; // + SYMBOL
+
+    // ✅ 預設顯示的交易日數（>1年）
+    // 252 約 1 年；400 約 1.6 年；520 約 2 年
+    const DISPLAY_TRADING_DAYS = 800;
+
+    // 狀態
+    let chart, candlestickSeries;
+    let currentSymbol = "AAPL";
+    let currentStockData = [];
+    let watchlist = [];
+    let stockMaConfigs = [];
+    let currentMaSeriesList = [];
+
+    // 簡易快取：減少短時間重抓（避開 AV 限流）
+    const memoryCache = new Map(); // symbol -> {ts,data}
+    const CACHE_TTL_MS = 60_000;   // 60秒
+
+    /**********************
+     * 1) 工具：狀態列
+     **********************/
+    function updateStatus(msg, type) {
+      const el = document.getElementById("status-bar");
+      if (!el) return;
+      el.textContent = msg;
+      const colors = { info: "text-blue-400", success: "text-green-400", error: "text-red-400" };
+      el.className = `text-[10px] font-bold ${colors[type] || "text-slate-500"}`;
+    }
+
+    /**********************
+     * 2) 資料：抓日線 OHLC（Alpha Vantage）
+     **********************/
+    async function fetchStockData(symbol) {
+      const sym = symbol.toUpperCase().trim();
+      updateStatus(`正在載入 ${sym} 行情...`, "info");
+
+      // cache hit
+      const cached = memoryCache.get(sym);
+      if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+        updateStatus(`使用快取資料：${sym}`, "success");
+        return cached.data;
+      }
+
+      const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${encodeURIComponent(sym)}&apikey=${AV_API_KEY}`;
+
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data["Note"]) throw new Error("Alpha Vantage 限流：請稍候再試（免費版每分鐘/每日有上限）");
+        const timeSeries = data["Time Series (Daily)"];
+        if (!timeSeries) throw new Error("無效股票代碼或暫無資料");
+
+        const bars = Object.keys(timeSeries)
+          .map(date => ({
+            time: date, // 'YYYY-MM-DD' ✅ Lightweight Charts 支援 BusinessDay
+            open: parseFloat(timeSeries[date]["1. open"]),
+            high: parseFloat(timeSeries[date]["2. high"]),
+            low:  parseFloat(timeSeries[date]["3. low"]),
+            close:parseFloat(timeSeries[date]["4. close"]),
+          }))
+          .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+        memoryCache.set(sym, { ts: Date.now(), data: bars });
+        return bars;
+      } catch (err) {
+        updateStatus(err.message || "載入失敗", "error");
+        return null;
+      }
+    }
+
+    /**********************
+     * 3) 指標：SMA
+     **********************/
+    function calculateSMA(data, period) {
+      const p = Math.max(2, Math.floor(Number(period)));
+      const sma = [];
+      for (let i = 0; i < data.length; i++) {
+        if (i < p - 1) continue;
+        let sum = 0;
+        for (let j = 0; j < p; j++) sum += data[i - j].close;
+        sma.push({ time: data[i].time, value: Number((sum / p).toFixed(2)) });
+      }
+      return sma;
+    }
+
+    /**********************
+     * 4) 圖表：畫K線 + 畫均線
+     **********************/
+    function initChart() {
+      const container = document.getElementById("chart-box");
+      if (!container || typeof LightweightCharts === "undefined") {
+        updateStatus("Lightweight Charts 載入失敗", "error");
+        return;
+      }
+
+      chart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: container.clientHeight || 480,
+        layout: { background: { color: "#020617" }, textColor: "#94a3b8" },
+        grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
+        timeScale: { borderColor: "#1e293b", timeVisible: true },
+      });
+
+      candlestickSeries = chart.addCandlestickSeries({
+        upColor: "#10b981",
+        downColor: "#ef4444",
+        borderVisible: false,
+        wickUpColor: "#10b981",
+        wickDownColor: "#ef4444",
+      });
+
+      // 用 ResizeObserver 讓 chart 跟著容器變動（flex/sidebar 變更也會觸發）
+      const ro = new ResizeObserver(() => {
+        chart.resize(container.clientWidth, container.clientHeight);
+      });
+      ro.observe(container);
+    }
+
+    function refreshMaLines() {
+      if (!chart) return;
+
+      // 移除舊線
+      currentMaSeriesList.forEach(s => chart.removeSeries(s));
+      currentMaSeriesList = [];
+
+      // 畫新線
+      stockMaConfigs.forEach(cfg => {
+        if (cfg.enabled && cfg.period > 0) {
+          const line = chart.addLineSeries({
+            color: cfg.color,
+            lineWidth: 2,
+            title: `MA${cfg.period}`,
+            priceLineVisible: false,
+          });
+          line.setData(calculateSMA(currentStockData, cfg.period));
+          currentMaSeriesList.push(line);
+        }
+      });
+    }
+
+    /**********************
+     * 5) 設定：每股均線 config（localStorage）
+     **********************/
+    function defaultMaConfigs() {
+      // ✅ 預設包含 MA300（你之前要的 300 個交易日均線）
+      return [
+        { period: 5,   color: "#60a5fa", enabled: true },
+        { period: 20,  color: "#facc15", enabled: true },
+        { period: 60,  color: "#34d399", enabled: false },
+        { period: 120, color: "#fb7185", enabled: false },
+        { period: 300, color: "#a78bfa", enabled: true },
+      ];
+    }
+
+    function loadMaConfigs(symbol) {
+      const key = LS_MA_PREFIX + symbol.toUpperCase();
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return defaultMaConfigs();
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return defaultMaConfigs();
+        return parsed.map(x => ({
+          period: Number(x.period) || 20,
+          color: typeof x.color === "string" ? x.color : "#60a5fa",
+          enabled: !!x.enabled,
+        }));
+      } catch {
+        return defaultMaConfigs();
+      }
+    }
+
+    function saveMaConfigs(symbol, configs) {
+      const key = LS_MA_PREFIX + symbol.toUpperCase();
+      localStorage.setItem(key, JSON.stringify(configs));
+    }
+
+    function renderControlPanel() {
+      const list = document.getElementById("ma-list");
+      list.innerHTML = "";
+
+      stockMaConfigs.forEach((cfg, i) => {
+        const row = document.createElement("div");
+        row.className = "flex items-center gap-2 mb-2 bg-slate-800 p-2 rounded-lg border border-slate-700 min-w-[160px]";
+
+        row.innerHTML = `
+          <input type="checkbox" ${cfg.enabled ? "checked" : ""} />
+          <input type="number" value="${cfg.period}" class="bg-slate-950 w-16 text-center text-xs py-1 rounded border border-slate-600" />
+          <input type="color" value="${cfg.color}" class="w-6 h-6 bg-transparent cursor-pointer" />
+          <button class="ml-auto text-slate-500 hover:text-red-400 text-xs">✕</button>
+        `;
+
+        const checkbox = row.querySelectorAll("input")[0];
+        const periodInput = row.querySelectorAll("input")[1];
+        const colorInput  = row.querySelectorAll("input")[2];
+        const delBtn      = row.querySelector("button");
+
+        checkbox.onchange = () => {
+          stockMaConfigs[i].enabled = checkbox.checked;
+          refreshMaLines();
+        };
+
+        periodInput.onchange = () => {
+          stockMaConfigs[i].period = parseInt(periodInput.value, 10) || 20;
+          refreshMaLines();
+        };
+
+        colorInput.onchange = () => {
+          stockMaConfigs[i].color = colorInput.value;
+          refreshMaLines();
+        };
+
+        delBtn.onclick = () => {
+          stockMaConfigs.splice(i, 1);
+          renderControlPanel();
+          refreshMaLines();
+        };
+
+        list.appendChild(row);
+      });
+    }
+
+    /**********************
+     * 6) Watchlist（localStorage）
+     **********************/
+    function loadWatchlist() {
+      try {
+        const raw = localStorage.getItem(LS_WATCHLIST_KEY);
+        if (!raw) return ["AAPL", "TSLA", "NVDA"];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return ["AAPL", "TSLA", "NVDA"];
+        return parsed.map(s => String(s).toUpperCase().trim()).filter(Boolean);
+      } catch {
+        return ["AAPL", "TSLA", "NVDA"];
+      }
+    }
+
+    function saveWatchlist() {
+      localStorage.setItem(LS_WATCHLIST_KEY, JSON.stringify(watchlist));
+    }
+
+    function renderWatchlist() {
+      const container = document.getElementById("watchlist-container");
+      container.innerHTML = "";
+
+      watchlist.forEach(sym => {
+        const item = document.createElement("div");
+        const isActive = sym === currentSymbol;
+
+        item.className =
+          `flex items-center justify-between p-3 rounded-xl cursor-pointer transition-all border ${
+            isActive
+              ? "bg-blue-600/20 border-blue-500/50 text-white shadow-lg"
+              : "bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800 hover:text-white"
+          }`;
+
+        item.innerHTML = `
+          <span class="font-bold text-sm tracking-tight">${sym}</span>
+          <button class="text-slate-600 hover:text-red-400 p-1" aria-label="remove">✕</button>
+        `;
+
+        item.onclick = () => switchStock(sym);
+
+        // 刪除按鈕：阻止冒泡，避免也切股
+        item.querySelector("button").onclick = (e) => {
+          e.stopPropagation();
+          removeFromWatchlist(sym);
+        };
+
+        container.appendChild(item);
+      });
+    }
+
+    function addToWatchlist(symbol) {
+      const sym = symbol.toUpperCase().trim();
+      if (!sym) return;
+      if (!watchlist.includes(sym)) {
+        watchlist.unshift(sym);
+        saveWatchlist();
+        renderWatchlist();
+        updateStatus(`${sym} 已加入自選`, "success");
+      }
+    }
+
+    function removeFromWatchlist(symbol) {
+      watchlist = watchlist.filter(s => s !== symbol);
+      saveWatchlist();
+      renderWatchlist();
+      updateStatus(`${symbol} 已移除`, "info");
+    }
+
+    /**********************
+     * 7) 切換股票（核心流程）
+     **********************/
+    async function switchStock(symbol) {
+      const sym = symbol.toUpperCase().trim();
+      if (!sym) return;
+
+      currentSymbol = sym;
+      document.getElementById("stock-input").value = sym;
+      document.getElementById("symbolTitle").textContent = sym;
+
+      // 先載入該股票 MA 設定 + UI
+      stockMaConfigs = loadMaConfigs(sym);
+      renderControlPanel();
+
+      // 抓行情（全量）
+      const data = await fetchStockData(sym);
+      if (!data) return;
+
+      // ✅ 只顯示最近 N 個交易日（>1年）
+      const displayData = data.slice(-DISPLAY_TRADING_DAYS);
+
+      currentStockData = displayData;
+      candlestickSeries.setData(displayData);
+      refreshMaLines();
+      chart.timeScale().fitContent();
+
+      renderWatchlist();
+      updateStatus("更新成功", "success");
+    }
+
+    /**********************
+     * 8) 事件綁定與初始化
+     **********************/
+    function bindEvents() {
+      document.getElementById("btn-search").addEventListener("click", () => {
+        switchStock(document.getElementById("stock-input").value);
+      });
+
+      document.getElementById("stock-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          switchStock(document.getElementById("stock-input").value);
+        }
+      });
+
+      document.getElementById("btn-add-watchlist").addEventListener("click", () => {
+        addToWatchlist(currentSymbol);
+      });
+
+      document.getElementById("btn-add-ma").addEventListener("click", () => {
+        // 小貼心：若沒有 MA300，第一次點先加 MA300
+        const has300 = stockMaConfigs.some(cfg => cfg.period === 300);
+        if (!has300) stockMaConfigs.push({ period: 300, color: "#a78bfa", enabled: true });
+        else stockMaConfigs.push({ period: 60, color: "#c084fc", enabled: true });
+
+        renderControlPanel();
+        refreshMaLines();
+      });
+
+      document.getElementById("btn-save").addEventListener("click", () => {
+        saveMaConfigs(currentSymbol, stockMaConfigs);
+        updateStatus(`已儲存 ${currentSymbol} 均線設定`, "success");
+      });
+    }
+
+    window.addEventListener("load", async () => {
+      initChart();
+      bindEvents();
+
+      watchlist = loadWatchlist();
+      renderWatchlist();
+
+      // 首次進入：載入 AAPL
+      await switchStock("AAPL");
+    });
+  </script>
+</body>
+</html>
+
